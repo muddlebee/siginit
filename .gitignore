@@ -1,0 +1,4 @@
+.env
+bin/
+fixtures/*/node_modules/
+fixtures/*/package-lock.json

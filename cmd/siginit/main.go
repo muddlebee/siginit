@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/joho/godotenv"
 	"github.com/muddlebee/siginit/internal/agent"
 	"github.com/muddlebee/siginit/internal/provider"
 	"github.com/muddlebee/siginit/internal/signoz"
@@ -31,6 +32,8 @@ var (
 )
 
 func main() {
+	_ = godotenv.Load() // load .env if present; silently ignored if missing
+
 	root := &cobra.Command{
 		Use:          "siginit",
 		Short:        "Agentic onboarding CLI for SigNoz — collapse time-to-first-value",
@@ -48,7 +51,7 @@ wires it to SigNoz, and verifies real telemetry arrived before declaring success
 	root.PersistentFlags().StringVar(&flagModel, "model", "", "Model override (default: provider default)")
 	root.PersistentFlags().StringVar(&flagSigNozURL, "signoz-url", "http://localhost:8080", "SigNoz base URL")
 	root.PersistentFlags().StringVar(&flagEmail, "email", "admin@siginit.local", "SigNoz admin email")
-	root.PersistentFlags().StringVar(&flagPassword, "password", "Admin123!", "SigNoz admin password")
+	root.PersistentFlags().StringVar(&flagPassword, "password", "Admin@12345678", "SigNoz admin password")
 	root.PersistentFlags().BoolVar(&flagRegister, "register", false, "Register admin account on first run")
 	root.PersistentFlags().StringVar(&flagCollector, "collector", "http://localhost:4318", "OTLP HTTP collector endpoint")
 
@@ -83,14 +86,11 @@ func initCmd() *cobra.Command {
 func runInit(projectPath string) error {
 	ctx := context.Background()
 
-	llmClient, prov, err := provider.New(flagProvider, flagAPIKey)
+	llmClient, prov, err := provider.New(flagProvider, flagAPIKey, flagModel)
 	if err != nil {
 		return err
 	}
-	model := flagModel
-	if model == "" {
-		model = prov.DefaultModel
-	}
+	model := prov.DefaultModel
 
 	sc := signoz.New(flagSigNozURL)
 	if err := ensureAuth(ctx, sc); err != nil {
@@ -131,6 +131,8 @@ Rules:
 - Call inspect_project FIRST before anything else.
 - Prefer zero-code auto-instrumentation: NODE_OPTIONS for Node.js, opentelemetry-instrument for Python.
 - OTel collector: %s  |  SigNoz: %s
+- To start a background server: always use "nohup ... &>/tmp/app.log 2>&1 & disown; sleep 2" so the process survives after bash exits.
+- After starting the server, make a test HTTP request (curl) to generate at least one trace.
 - You MUST call query_signoz to verify traces — never declare success without it.
 - On verify failure: fix the most likely issue, then call query_signoz once more.
 - Be concise. Developers want commands and results, not paragraphs.`, flagCollector, flagSigNozURL)
@@ -144,10 +146,46 @@ Collector: %s`, projectPath, svcHint, flagCollector)
 		_ = ag.Run(ctx, systemPrompt, userMsg)
 	}()
 
-	m := tui.New("init — "+projectPath, events)
-	prog := tea.NewProgram(m, tea.WithAltScreen())
-	_, err = prog.Run()
-	return err
+	if isTTY() {
+		m := tui.New("init — "+projectPath, events)
+		prog := tea.NewProgram(m, tea.WithAltScreen())
+		_, err = prog.Run()
+		return err
+	}
+	return runHeadless(events)
+}
+
+// isTTY returns true when stdout is connected to an interactive terminal.
+func isTTY() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+// runHeadless drains the agent event channel and prints events to stdout.
+// Used when not connected to a terminal (CI, pipes, sub-shells).
+func runHeadless(events <-chan agent.Event) error {
+	for e := range events {
+		switch e.Kind {
+		case agent.EventThinking:
+			fmt.Printf("  ⋯  %s\n", e.Message)
+		case agent.EventToolCall:
+			fmt.Printf("  →  %s\n", e.Message)
+		case agent.EventToolResult:
+			fmt.Printf("  ←  %s\n", e.Message)
+		case agent.EventFinal:
+			fmt.Printf("  ✓  %s\n", e.Message)
+			return nil
+		case agent.EventError:
+			fmt.Printf("  ✗  %s\n", e.Message)
+			return fmt.Errorf("%s", e.Message)
+		case agent.EventPermission:
+			fmt.Printf("  ⚠  %s\n", e.Message)
+		}
+	}
+	return nil
 }
 
 // ── siginit doctor ────────────────────────────────────────────────────────────

@@ -49,11 +49,41 @@ func (c *Client) Register(ctx context.Context, name, email, password, orgName st
 	return err
 }
 
+// OrgContext fetches available orgs from GET /api/v2/sessions/context (open, no auth).
+// Returns the ID of the first org found, or "" if none.
+func (c *Client) OrgContext(ctx context.Context, email string) (string, error) {
+	raw, err := c.do(ctx, http.MethodGet, "/api/v2/sessions/context?email="+email+"&ref=", nil)
+	if err != nil {
+		return "", fmt.Errorf("session context: %w", err)
+	}
+	var envelope struct {
+		Data struct {
+			Orgs []struct {
+				ID string `json:"id"`
+			} `json:"orgs"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return "", fmt.Errorf("session context: decode: %w", err)
+	}
+	if len(envelope.Data.Orgs) == 0 {
+		return "", nil
+	}
+	return envelope.Data.Orgs[0].ID, nil
+}
+
 // Login authenticates via POST /api/v2/sessions/email_password and returns an access token.
+// It auto-fetches the orgId from /api/v2/sessions/context if not already known.
 func (c *Client) Login(ctx context.Context, email, password string) (string, error) {
+	orgID, err := c.OrgContext(ctx, email)
+	if err != nil {
+		return "", fmt.Errorf("login: get org context: %w", err)
+	}
+
 	body := map[string]any{
 		"email":    email,
 		"password": password,
+		"orgId":    orgID,
 	}
 	raw, err := c.do(ctx, http.MethodPost, "/api/v2/sessions/email_password", body)
 	if err != nil {
@@ -75,11 +105,6 @@ func (c *Client) Login(ctx context.Context, email, password string) (string, err
 	return envelope.Data.AccessToken, nil
 }
 
-// ServiceName is a lightweight service entry.
-type ServiceName struct {
-	ServiceName string `json:"serviceName"`
-}
-
 // Services returns the list of services seen by SigNoz.
 // GET /api/v1/services/list (ViewAccess — requires token).
 func (c *Client) Services(ctx context.Context, start, end time.Time) ([]string, error) {
@@ -91,17 +116,9 @@ func (c *Client) Services(ctx context.Context, start, end time.Time) ([]string, 
 		return nil, err
 	}
 
-	var envelope struct {
-		Data []struct {
-			ServiceName string `json:"serviceName"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(raw, &envelope); err != nil {
+	var names []string
+	if err := json.Unmarshal(raw, &names); err != nil {
 		return nil, fmt.Errorf("services: decode: %w", err)
-	}
-	names := make([]string, 0, len(envelope.Data))
-	for _, s := range envelope.Data {
-		names = append(names, s.ServiceName)
 	}
 	return names, nil
 }
@@ -183,24 +200,33 @@ func (c *Client) CountSpans(ctx context.Context, serviceName string, start, end 
 	return sumSeriesValues(envelope), nil
 }
 
-// sumSeriesValues traverses the response and sums numeric "value" fields.
+// sumSeriesValues traverses the v5 query_range response and sums all span counts.
+// Response path: data → data → results[] → aggregations[] → series[] → values[] → value
 func sumSeriesValues(resp map[string]any) int64 {
 	var total int64
-	data, _ := resp["data"].(map[string]any)
-	if data == nil {
+	outerData, _ := resp["data"].(map[string]any)
+	if outerData == nil {
 		return 0
 	}
-	results, _ := data["result"].([]any)
+	innerData, _ := outerData["data"].(map[string]any)
+	if innerData == nil {
+		return 0
+	}
+	results, _ := innerData["results"].([]any)
 	for _, r := range results {
 		rm, _ := r.(map[string]any)
-		series, _ := rm["series"].([]any)
-		for _, s := range series {
-			sm, _ := s.(map[string]any)
-			points, _ := sm["values"].([]any)
-			for _, p := range points {
-				pm, _ := p.(map[string]any)
-				if v, ok := pm["value"].(float64); ok {
-					total += int64(v)
+		aggregations, _ := rm["aggregations"].([]any)
+		for _, a := range aggregations {
+			am, _ := a.(map[string]any)
+			series, _ := am["series"].([]any)
+			for _, s := range series {
+				sm, _ := s.(map[string]any)
+				points, _ := sm["values"].([]any)
+				for _, p := range points {
+					pm, _ := p.(map[string]any)
+					if v, ok := pm["value"].(float64); ok {
+						total += int64(v)
+					}
 				}
 			}
 		}

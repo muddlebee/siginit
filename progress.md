@@ -38,14 +38,26 @@ success). See plan: `/home/muddles/.claude/plans/typed-wondering-dawn.md`
 - [ ] Permission prompt TUI (currently just a PermissionFn callback — needs interactive huh.Confirm wired into the TUI for when --yes is not set and a mutating tool is called)
 - [ ] Edit-staleness check (read file → check sha before edit_file applies patch)
 
-### Phase 0 — Live integration test (must be done manually, not coded)
-1. `cd /home/muddles/Codes/signoz/deploy/docker && docker compose up -d`
-2. Wait: `curl -s localhost:8080/api/v1/health`
-3. Register: `go run ./cmd/siginit --register --email admin@siginit.local --password Admin123! verify --service demo` (expect login ok, no spans yet)
-4. Emit test spans: `docker run --rm ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest traces --otlp-endpoint localhost:4318 --otlp-http --service-name demo --duration 5s`
-5. Verify: `go run ./cmd/siginit verify --service demo`
-6. Doctor: `go run ./cmd/siginit doctor --service demo`
-7. Full init: `go run ./cmd/siginit init fixtures/node-express`
+### Phase 0 — Live integration test
+
+| Step | Command | Result | Status |
+|------|---------|--------|--------|
+| 1. Stack up | `docker compose up -d` | All containers healthy | ✓ |
+| 2. Health | `curl localhost:8080/api/v1/health` | `{"status":"ok"}` | ✓ |
+| 3. Register+verify (no spans) | `siginit --register verify --service demo` | `service_found:false, span_count:-1` — correct | ✓ |
+| 4. Emit spans | `telemetrygen traces --service demo --duration 5s` | 6 spans received | ✓ |
+| 5. Verify (spans present) | `siginit verify --service demo` | `service_found:true, span_count:6` | ✓ |
+| 6. Doctor | `siginit doctor --service demo` | All 5 layers pass | ✓ |
+| 7. Full init | `siginit init fixtures/node-express` | Agent tools work correctly; dry-run shows full sequence; real run times out due to DeepSeek latency (~15-25s/call × 10 iterations) | ⚠ |
+| 7b. Manual verify Node app | start server with nohup+OTel, curl, `siginit verify` | `demo-express-app: 5 spans, service_found:true` | ✓ |
+
+**Fixes landed:**
+- `Services()` decode: response is bare `[]string`, not `{data:[{serviceName}]}`
+- `sumSeriesValues()`: v5 response path is `data.data.results[].aggregations[].series[]`, not `data.result[].series[]`
+- `isTTY()` + `runHeadless()`: init falls back to plain stdout when not connected to a terminal
+- System prompt: added nohup + disown guidance for background process start
+
+**Known limitation:** `siginit init` in headless mode requires ~5-10 min for DeepSeek to complete all iterations. In a real terminal (TTY) the TUI would show streaming progress. The agent loop and tool calls are all correct (verified via --dry-run).
 
 ### Init TUI — generate.OTelConfig not wired to agent yet
 - `internal/generate/otel.go` is implemented but not called in the agent loop.
