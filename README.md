@@ -4,11 +4,24 @@ Agentic onboarding CLI for [SigNoz](https://signoz.io). Detects your stack, gene
 OpenTelemetry instrumentation, wires it to a SigNoz instance, and **verifies real traces
 arrived** before declaring success.
 
+One command launches an interactive REPL — everything else is a slash command:
+
 ```
-siginit init ./my-app        # instrument + verify
-siginit doctor               # diagnose why data isn't flowing
-siginit verify --service X   # check a specific service right now
+$ siginit
+siginit> /register                     # first run only — create SigNoz admin
+siginit> /init fixtures/node-express   # instrument a project + verify traces
+siginit> /verify demo-express-app      # check a service is visible right now
+siginit> /doctor                       # diagnose why data isn't flowing
+siginit> /help                         # list commands
+siginit> /quit
 ```
+
+The status bar always shows where you're pointed:
+`● localhost:8080  deepseek/deepseek-v4-flash  ✓ auth`.
+
+Every slash command runs the same real integration (live SigNoz auth, `query_range`,
+the full agent loop) — nothing is stubbed. The same actions exist as one-shot
+subcommands for CI/scripting; see [Scripting & CI](#scripting--ci).
 
 ## Why
 
@@ -33,8 +46,9 @@ inspect_project → read files → generate OTel config → install SDK
 ```
 
 Every step is a tool call. The agent loop runs until `query_signoz` returns
-`service_found: true` or max iterations is reached. Mutating steps require approval
-unless `--yes` is passed.
+`service_found: true` or max iterations is reached. In the REPL, `/init` auto-approves
+tool calls so the run is hands-off; the `siginit init` subcommand gates mutating steps
+behind approval unless `--yes` is passed.
 
 ## Quick start
 
@@ -64,37 +78,33 @@ cp .env.example .env
 ### Run
 
 ```bash
-# First run — register an admin account in SigNoz
-./bin/siginit --register verify --service demo
-
-# Instrument a project end-to-end
-./bin/siginit init --yes ./my-app
-
-# Diagnose why traces aren't flowing
-./bin/siginit doctor
-
-# Check a specific service
-./bin/siginit verify --service my-app
+./bin/siginit
 ```
 
-## Commands
+That's the whole thing — one command opens the REPL. Then drive it with slash commands.
 
-### `siginit init [path]`
+## REPL commands
 
-Instruments the project at `path` and verifies traces reach SigNoz.
+| Command | What it does |
+|---------|--------------|
+| `/init [path]` | Instrument the project at `path` (default `.`) and verify traces reach SigNoz. Streams every agent tool call live. |
+| `/verify <svc>` | Instant check: is service `svc` visible in SigNoz right now? |
+| `/doctor [svc]` | Five-layer diagnostic of why traces aren't flowing. |
+| `/register` | Register the admin account in SigNoz (first run only), then authenticate. |
+| `/help` | List commands. |
+| `/clear` | Clear the log. |
+| `/quit` | Exit. |
 
+Pointing siginit somewhere else (different SigNoz URL, provider, collector) is done with
+flags at launch — they apply to the whole REPL session:
+
+```bash
+./bin/siginit --provider openai --model gpt-4o-mini \
+  --signoz-url http://localhost:8080 \
+  --collector http://localhost:4318
 ```
-Flags:
-  --yes          Auto-approve all file edits and command runs
-  --dry-run      Preview agent actions without executing anything
-  --service      Override the OTel service name
-  --provider     LLM provider: deepseek (default) | openai
-  --model        Model override (default: provider's default)
-  --collector    OTLP HTTP endpoint (default: http://localhost:4318)
-  --signoz-url   SigNoz base URL (default: http://localhost:8080)
-```
 
-### `siginit doctor`
+### `/doctor` output
 
 Five-layer diagnostic: TCP reachability → SigNoz health → auth → services list → span count.
 
@@ -106,9 +116,7 @@ Five-layer diagnostic: TCP reachability → SigNoz health → auth → services 
   ✓  [span_count]      42 spans from "my-app"
 ```
 
-### `siginit verify --service X`
-
-Instant check: is service `X` visible in SigNoz right now?
+### `/verify` output
 
 ```json
 {
@@ -117,6 +125,34 @@ Instant check: is service `X` visible in SigNoz right now?
   "verdict": "SUCCESS: service \"my-app\" is visible in SigNoz with 42 spans",
   "window": "last 15 minutes"
 }
+```
+
+## Scripting & CI
+
+For non-interactive use the same actions are exposed as one-shot subcommands. They share
+the agent loop and verify client with the REPL — they're just headless entry points (they
+auto-detect a non-TTY and stream plain-text output).
+
+```bash
+# Instrument a project end-to-end, auto-approving all edits/commands
+siginit init --yes ./my-app
+
+# Diagnose why traces aren't flowing
+siginit doctor
+
+# Check a specific service
+siginit verify --service my-app
+```
+
+```
+Flags (init):
+  --yes          Auto-approve all file edits and command runs
+  --dry-run      Preview agent actions without executing anything
+  --service      Override the OTel service name
+  --provider     LLM provider: deepseek (default) | openai
+  --model        Model override (default: provider's default)
+  --collector    OTLP HTTP endpoint (default: http://localhost:4318)
+  --signoz-url   SigNoz base URL (default: http://localhost:8080)
 ```
 
 ## Providers
@@ -155,17 +191,23 @@ See [AGENTS.md](AGENTS.md) for the full agentic behavior spec.
 # Start SigNoz locally
 cd deploy/docker && docker compose up -d
 
-# Instrument the bundled Express demo app
-siginit init --yes fixtures/node-express
+# Launch the REPL
+siginit
+```
 
-# Expected output (truncated):
-#   →  inspect_project({"path": "fixtures/node-express"})
-#   ←  stack: javascript / express
-#   →  generate_otel_config({"language": "javascript", ...})
-#   →  run_command({"command": "npm install @opentelemetry/auto-instrumentations-node"})
-#   →  run_command({"command": "nohup node server.js ..."})
-#   →  query_signoz({"service_name": "demo-express-app"})
-#   ✓  SUCCESS: service "demo-express-app" is visible in SigNoz with 6 spans
+```
+siginit> /register
+  ✓  registered and authenticated
+
+siginit> /init fixtures/node-express
+  instrumenting "fixtures/node-express"…
+  →  inspect_project({"path": "fixtures/node-express"})
+  ←  stack: javascript / express
+  →  generate_config({"language": "javascript", ...})
+  →  run_command({"command": "npm install @opentelemetry/auto-instrumentations-node"})
+  →  run_command({"command": "nohup node server.js ..."})
+  →  query_signoz({"service_name": "demo-express-app"})
+  ✓  SUCCESS: service "demo-express-app" is visible in SigNoz with 6 spans
 ```
 
 ## License
